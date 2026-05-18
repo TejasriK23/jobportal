@@ -1,16 +1,40 @@
 import os
-from flask import Flask, request, render_template_string
 import sqlite3
 import requests
 import PyPDF2
 import io
 import json
 import subprocess
+from flask import Flask, request, render_template_string
 
 app = Flask(__name__)
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY", "")
+
+def setup_database():
+    conn = sqlite3.connect("jobs.db")
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT, company TEXT, location TEXT,
+            description TEXT, apply_link TEXT UNIQUE,
+            date_scraped TEXT, job_type TEXT
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS applications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_title TEXT, company TEXT, apply_link TEXT,
+            status TEXT DEFAULT 'Pending Review',
+            date_applied TEXT, notes TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+setup_database()
 
 def get_all_jobs(search="", company=""):
     conn = sqlite3.connect("jobs.db")
@@ -38,28 +62,6 @@ def get_companies():
     conn.close()
     return companies
 
-def init_tracker_db():
-    conn = sqlite3.connect("jobs.db")
-    c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS jobs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT, company TEXT, location TEXT,
-            description TEXT, apply_link TEXT UNIQUE,
-            date_scraped TEXT, job_type TEXT
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS applications (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            job_title TEXT, company TEXT, apply_link TEXT,
-            status TEXT DEFAULT 'Pending Review',
-            date_applied TEXT, notes TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
-
 def save_application(job_title, company, apply_link):
     from datetime import datetime
     conn = sqlite3.connect("jobs.db")
@@ -81,12 +83,18 @@ def get_applications():
              "status": r[4], "date": r[5]} for r in rows]
 
 def ask_ai(prompt):
+    if not GROQ_API_KEY:
+        return "AI unavailable"
     headers = {"Authorization": "Bearer " + GROQ_API_KEY, "Content-Type": "application/json"}
     body = {"model": "llama-3.3-70b-versatile",
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 500}
-    r = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=body)
-    return r.json()["choices"][0]["message"]["content"]
+    try:
+        r = requests.post("https://api.groq.com/openai/v1/chat/completions",
+                         headers=headers, json=body, timeout=30)
+        return r.json()["choices"][0]["message"]["content"]
+    except:
+        return "AI unavailable"
 
 def read_pdf(file_bytes):
     reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
@@ -97,17 +105,58 @@ def score_job(resume_text, job):
 Job: {job['title']} at {job['company']}
 Description: {job['description']}
 Resume: {resume_text[:800]}
-Reply with ONLY a number 0-100."""
+Reply with ONLY a number 0-100. Nothing else."""
     try:
         score = ask_ai(prompt).strip()
         return int(''.join(filter(str.isdigit, score))[:3])
     except:
         return 50
 
+def seed_sample_jobs():
+    conn = sqlite3.connect("jobs.db")
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM jobs")
+    count = c.fetchone()[0]
+    conn.close()
+    if count == 0:
+        from datetime import datetime
+        today = datetime.now().strftime("%Y-%m-%d")
+        sample_jobs = [
+            ("Software Engineer", "Amazon", "Seattle, WA", "Build and scale distributed systems on AWS. Python, Java, distributed systems experience required.", "https://www.amazon.jobs/en/search?base_query=software+engineer&loc_query=seattle", today, "Onsite"),
+            ("Cloud Security Engineer", "Microsoft", "Redmond, WA", "Secure Azure cloud infrastructure. IAM, security policies, cloud architecture experience.", "https://jobs.careers.microsoft.com/global/en/search?q=cloud+security+seattle", today, "Hybrid"),
+            ("IAM Engineer", "Accenture", "Seattle, WA", "Identity and Access Management implementation. Active Directory, Okta, CyberArk experience preferred.", "https://www.accenture.com/us-en/careers/jobsearch?jk=iam+seattle", today, "Onsite"),
+            ("DevOps Engineer", "Google", "Seattle, WA", "CI/CD pipelines, Kubernetes, Docker, GCP. Automate infrastructure and deployment processes.", "https://careers.google.com/jobs/results/?q=devops+engineer&location=Seattle", today, "Hybrid"),
+            ("Cybersecurity Analyst", "Boeing", "Seattle, WA", "Protect aerospace systems. Security monitoring, incident response, SIEM tools experience.", "https://jobs.boeing.com/search-jobs/cybersecurity/Seattle", today, "Onsite"),
+            ("Backend Engineer", "Expedia", "Seattle, WA", "Build travel platform APIs. Java, Spring Boot, microservices, AWS experience required.", "https://lifeatexpediagroup.com/jobs?keyword=backend+engineer&location=Seattle", today, "Hybrid"),
+            ("IAM Specialist Remote", "Wipro", "Remote — USA", "Remote IAM role. SailPoint, Okta, Active Directory. Work from anywhere in USA.", "https://careers.wipro.com/careers-home/jobs?keyword=iam+remote", today, "Remote"),
+            ("Cloud Architect Remote", "Infosys", "Remote — USA", "Design cloud solutions on AWS/Azure. Remote position. 5+ years cloud architecture experience.", "https://career.infosys.com/joblist?type=search&searchText=cloud+architect+remote", today, "Remote"),
+            ("Systems Administrator", "Zillow", "Seattle, WA", "Manage IT infrastructure for real estate platform. Windows Server, Linux, networking experience.", "https://www.zillow.com/careers/", today, "Hybrid"),
+            ("Network Engineer", "T-Mobile", "Bellevue, WA", "Design and maintain network infrastructure. CCNA/CCNP, routing protocols, network security.", "https://careers.t-mobile.com/search-jobs/network+engineer/bellevue", today, "Onsite"),
+            ("PowerShell Engineer Remote", "TCS", "Remote — USA", "Automate enterprise IT processes using PowerShell and Python. Remote work available.", "https://www.tcs.com/careers/tcs-careers-apply-now?role=powershell", today, "Remote"),
+            ("IT Security Engineer", "Tableau", "Seattle, WA", "Salesforce subsidiary. Security operations, vulnerability management, penetration testing.", "https://www.salesforce.com/company/careers/seattle/", today, "Hybrid"),
+            ("Active Directory Engineer", "Accenture", "Remote — USA", "Manage AD infrastructure remotely. Group Policy, DNS, LDAP, identity federation experience.", "https://www.accenture.com/us-en/careers/jobsearch?jk=active+directory+remote", today, "Remote"),
+            ("Cloud Engineer AWS", "Amazon", "Seattle, WA", "Deploy and manage AWS infrastructure. EC2, S3, Lambda, CloudFormation, Terraform skills needed.", "https://www.amazon.jobs/en/search?base_query=cloud+engineer&loc_query=seattle", today, "Onsite"),
+            ("Cybersecurity Engineer Remote", "Microsoft", "Remote — USA", "Remote security engineering role. Azure Security Center, Defender, identity protection.", "https://jobs.careers.microsoft.com/global/en/search?q=cybersecurity+remote", today, "Remote"),
+        ]
+        conn = sqlite3.connect("jobs.db")
+        c = conn.cursor()
+        for job in sample_jobs:
+            try:
+                c.execute("""INSERT OR IGNORE INTO jobs
+                    (title,company,location,description,apply_link,date_scraped,job_type)
+                    VALUES(?,?,?,?,?,?,?)""", job)
+            except:
+                pass
+        conn.commit()
+        conn.close()
+        print(f"Seeded {len(sample_jobs)} sample jobs")
+
+seed_sample_jobs()
+
 HTML = """<!DOCTYPE html>
 <html>
 <head>
-<title>JobPortal — AI Job Matching</title>
+<title>JobPortal — AI Job Matching Seattle & Remote</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -118,7 +167,8 @@ body{font-family:'Segoe UI',sans-serif;background:#f0f4f8;color:#2d3748}
 .navbar-links a:hover,.navbar-links a.active{background:#667eea;color:#fff}
 .hero{background:linear-gradient(135deg,#667eea,#764ba2);padding:60px 32px;text-align:center;color:#fff}
 .hero h2{font-size:36px;margin-bottom:12px}
-.hero p{font-size:18px;opacity:.9;margin-bottom:32px}
+.hero p{font-size:18px;opacity:.9;margin-bottom:8px}
+.hero .sub{font-size:14px;opacity:.7;margin-bottom:32px}
 .upload-card{background:#fff;border-radius:16px;padding:32px;max-width:500px;margin:0 auto;box-shadow:0 4px 20px rgba(0,0,0,.15)}
 .upload-card label{display:block;font-weight:600;margin-bottom:8px;color:#4a5568}
 .upload-card input[type=file]{width:100%;padding:12px;border:2px dashed #cbd5e0;border-radius:8px;margin-bottom:16px;cursor:pointer}
@@ -150,7 +200,9 @@ body{font-family:'Segoe UI',sans-serif;background:#f0f4f8;color:#2d3748}
 .apply-btn{background:#48bb78;color:#fff;padding:10px 20px;border-radius:8px;font-weight:600;font-size:14px;border:none;cursor:pointer}
 .apply-btn:hover{background:#38a169}
 .view-btn{background:#667eea;color:#fff;padding:10px 20px;border-radius:8px;text-decoration:none;font-weight:600;font-size:14px}
-.tag{background:#ebf4ff;color:#3182ce;padding:4px 10px;border-radius:20px;font-size:12px;font-weight:600}
+.tag-remote{background:#e9d8fd;color:#553c9a;padding:4px 10px;border-radius:20px;font-size:12px;font-weight:600}
+.tag-onsite{background:#ebf4ff;color:#3182ce;padding:4px 10px;border-radius:20px;font-size:12px;font-weight:600}
+.tag-hybrid{background:#fefcbf;color:#744210;padding:4px 10px;border-radius:20px;font-size:12px;font-weight:600}
 .profile-box{background:#ebf8ff;border:1px solid #bee3f8;border-radius:12px;padding:20px;margin-bottom:24px}
 .profile-box h3{color:#2b6cb0;margin-bottom:8px}
 .profile-box p{color:#2d3748;font-size:14px;line-height:1.8}
@@ -163,11 +215,14 @@ body{font-family:'Segoe UI',sans-serif;background:#f0f4f8;color:#2d3748}
 .status-pending{background:#feebc8;color:#744210}
 .page-title{font-size:24px;font-weight:700;margin-bottom:24px;color:#2d3748}
 .empty{text-align:center;padding:60px;color:#718096}
+.type-filter{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:24px}
+.type-btn{padding:8px 16px;border-radius:20px;border:2px solid #e2e8f0;background:#fff;cursor:pointer;font-size:13px;font-weight:600;color:#4a5568}
+.type-btn:hover,.type-btn.active{background:#667eea;color:#fff;border-color:#667eea}
 </style>
 </head>
 <body>
 <div class="navbar">
-  <h1>JobPortal</h1>
+  <h1>🚀 JobPortal</h1>
   <div class="navbar-links">
     <a href="/" class="{{ 'active' if page=='home' }}">Find Jobs</a>
     <a href="/tracker" class="{{ 'active' if page=='tracker' }}">My Applications</a>
@@ -193,23 +248,28 @@ body{font-family:'Segoe UI',sans-serif;background:#f0f4f8;color:#2d3748}
     </tbody>
   </table>
   {% else %}
-  <div class="empty"><p>No applications yet. <a href="/" style="color:#667eea">Find Jobs</a> and click Auto Apply!</p></div>
+  <div class="empty">
+    <p style="font-size:18px;margin-bottom:12px">No applications yet</p>
+    <p><a href="/" style="color:#667eea">Upload your resume</a> and click Apply on any job!</p>
+  </div>
   {% endif %}
 </div>
 
 {% elif not jobs and not profile %}
 <div class="hero">
   <h2>Find Your Perfect Job with AI</h2>
-  <p>Upload your resume — AI matches and finds Seattle & Remote USA jobs for you</p>
+  <p>Seattle & Remote USA — Amazon, Microsoft, Google, Boeing and more</p>
+  <p class="sub">Upload your resume — AI scores every job by how well it matches you</p>
   <div class="upload-card">
     <form method="POST" enctype="multipart/form-data"
           onsubmit="document.getElementById('loading').style.display='block';this.querySelector('button').style.display='none'">
       <label>Upload your resume (PDF)</label>
       <input type="file" name="resume" accept=".pdf" required>
-      <button type="submit" class="btn">Analyze Resume & Find Jobs</button>
+      <button type="submit" class="btn">🔍 Analyze Resume & Find Jobs</button>
     </form>
-    <div id="loading" style="display:none;color:#667eea;margin-top:16px;font-weight:600">
-      Analyzing resume and scoring all jobs... please wait
+    <div id="loading" style="display:none;color:#667eea;margin-top:16px;font-weight:600;text-align:center">
+      ⏳ Analyzing your resume and scoring all jobs...<br>
+      <small style="color:#a0aec0">This takes about 30 seconds</small>
     </div>
   </div>
 </div>
@@ -218,18 +278,32 @@ body{font-family:'Segoe UI',sans-serif;background:#f0f4f8;color:#2d3748}
 <div class="container">
   {% if profile %}
   <div class="profile-box">
-    <h3>Your AI Profile</h3>
-    <p><strong>Name:</strong> {{ profile.name }} &nbsp;|&nbsp;
-       <strong>Skills:</strong> {{ profile.skills }} &nbsp;|&nbsp;
-       <strong>Best roles:</strong> {{ profile.roles }}</p>
+    <h3>✅ Your AI Profile</h3>
+    <p>
+      <strong>Name:</strong> {{ profile.name }} &nbsp;|&nbsp;
+      <strong>Skills:</strong> {{ profile.skills }} &nbsp;|&nbsp;
+      <strong>Best roles:</strong> {{ profile.roles }}
+    </p>
   </div>
   {% endif %}
 
   <div class="stats-bar">
-    <div class="stat"><div class="stat-num">{{ jobs|length }}</div><div class="stat-label">Total Jobs</div></div>
-    <div class="stat"><div class="stat-num">{{ jobs|selectattr('score','ge',70)|list|length }}</div><div class="stat-label">Strong Matches</div></div>
-    <div class="stat"><div class="stat-num">{{ companies|length }}</div><div class="stat-label">Companies</div></div>
-    <div class="stat"><div class="stat-num">{{ jobs|selectattr('score','ge',50)|list|length }}</div><div class="stat-label">Good Matches</div></div>
+    <div class="stat">
+      <div class="stat-num">{{ jobs|length }}</div>
+      <div class="stat-label">Total Jobs</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num">{{ jobs|selectattr('score','ge',70)|list|length }}</div>
+      <div class="stat-label">Strong Matches</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num">{{ jobs|selectattr('type','equalto','Remote')|list|length }}</div>
+      <div class="stat-label">Remote Jobs</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num">{{ companies|length }}</div>
+      <div class="stat-label">Companies</div>
+    </div>
   </div>
 
   <div class="filters">
@@ -238,6 +312,12 @@ body{font-family:'Segoe UI',sans-serif;background:#f0f4f8;color:#2d3748}
       <select name="company">
         <option value="">All companies</option>
         {% for c in companies %}<option value="{{ c }}" {{ 'selected' if c==selected_company }}>{{ c }}</option>{% endfor %}
+      </select>
+      <select name="job_type">
+        <option value="">All types</option>
+        <option value="Remote" {{ 'selected' if job_type=='Remote' }}>Remote 🌐</option>
+        <option value="Onsite" {{ 'selected' if job_type=='Onsite' }}>Onsite 📍</option>
+        <option value="Hybrid" {{ 'selected' if job_type=='Hybrid' }}>Hybrid 🔄</option>
       </select>
       <button type="submit">Search</button>
     </form>
@@ -256,17 +336,25 @@ body{font-family:'Segoe UI',sans-serif;background:#f0f4f8;color:#2d3748}
         {% endif %}
       </div>
       <div class="job-company">{{ job.company }}</div>
-      <div class="job-meta">{{ job.location }} · {{ job.type }} · Posted {{ job.date }}</div>
-      {% if job.description %}<div class="job-desc">{{ job.description[:180] }}{% if job.description|length>180 %}...{% endif %}</div>{% endif %}
+      <div class="job-meta">📍 {{ job.location }} &nbsp;·&nbsp; 📅 Posted {{ job.date }}</div>
+      {% if job.description %}
+      <div class="job-desc">{{ job.description[:200] }}{% if job.description|length>200 %}...{% endif %}</div>
+      {% endif %}
       <div class="job-actions">
         <form method="POST" action="/autoapply" style="display:inline">
           <input type="hidden" name="job_link" value="{{ job.apply_link }}">
           <input type="hidden" name="job_title" value="{{ job.title }}">
           <input type="hidden" name="company" value="{{ job.company }}">
-          <button type="submit" class="apply-btn">Auto Apply</button>
+          <button type="submit" class="apply-btn">⚡ Apply Now</button>
         </form>
-        <a href="{{ job.apply_link }}" target="_blank" class="view-btn">View Job</a>
-        <span class="tag">{{ job.company }}</span>
+        <a href="{{ job.apply_link }}" target="_blank" class="view-btn">👁 View Job</a>
+        {% if job.type == 'Remote' %}
+        <span class="tag-remote">🌐 Remote</span>
+        {% elif job.type == 'Hybrid' %}
+        <span class="tag-hybrid">🔄 Hybrid</span>
+        {% else %}
+        <span class="tag-onsite">📍 Onsite</span>
+        {% endif %}
       </div>
     </div>
     {% endfor %}
@@ -279,8 +367,8 @@ body{font-family:'Segoe UI',sans-serif;background:#f0f4f8;color:#2d3748}
 def index():
     search = request.args.get("search", "")
     selected_company = request.args.get("company", "")
+    job_type = request.args.get("job_type", "")
     companies = get_companies()
-    init_tracker_db()
 
     if request.method == "POST":
         file = request.files.get("resume")
@@ -296,15 +384,35 @@ def index():
             all_jobs.sort(key=lambda x: x["score"], reverse=True)
             return render_template_string(HTML, jobs=all_jobs, profile=profile,
                 companies=companies, search="", selected_company="",
-                page="home", applications=[])
+                job_type="", page="home", applications=[])
 
-    jobs = get_all_jobs(search, selected_company) if (search or selected_company) else []
-    for job in jobs:
-        job["score"] = 0
-    return render_template_string(HTML,
-        jobs=jobs if (search or selected_company) else None,
-        profile=None, companies=companies, search=search,
-        selected_company=selected_company, page="home", applications=[])
+    if search or selected_company or job_type:
+        conn = sqlite3.connect("jobs.db")
+        c = conn.cursor()
+        query = "SELECT id,title,company,location,description,apply_link,date_scraped,job_type FROM jobs WHERE 1=1"
+        params = []
+        if search:
+            query += " AND (title LIKE ? OR description LIKE ?)"
+            params += [f"%{search}%", f"%{search}%"]
+        if selected_company:
+            query += " AND company=?"
+            params.append(selected_company)
+        if job_type:
+            query += " AND job_type=?"
+            params.append(job_type)
+        query += " ORDER BY date_scraped DESC"
+        c.execute(query, params)
+        rows = c.fetchall()
+        conn.close()
+        jobs = [{"id":r[0],"title":r[1],"company":r[2],"location":r[3],
+                 "description":r[4],"apply_link":r[5],"date":r[6],"type":r[7],"score":0} for r in rows]
+        return render_template_string(HTML, jobs=jobs, profile=None,
+            companies=companies, search=search, selected_company=selected_company,
+            job_type=job_type, page="home", applications=[])
+
+    return render_template_string(HTML, jobs=None, profile=None,
+        companies=companies, search="", selected_company="",
+        job_type="", page="home", applications=[])
 
 @app.route("/autoapply", methods=["POST"])
 def autoapply():
@@ -313,29 +421,31 @@ def autoapply():
     company = request.form.get("company")
     save_application(job_title, company, job_link)
     return f"""<!DOCTYPE html>
-<html><head><title>Applying...</title>
-<style>body{{font-family:'Segoe UI',sans-serif;background:#f0f4f8;text-align:center;padding:80px 20px}}
+<html><head><title>Applied!</title>
+<style>
+body{{font-family:'Segoe UI',sans-serif;background:#f0f4f8;text-align:center;padding:80px 20px}}
 .card{{background:#fff;border-radius:16px;padding:48px;max-width:500px;margin:0 auto;box-shadow:0 4px 20px rgba(0,0,0,.1)}}
-h2{{color:#48bb78;margin-bottom:16px}}p{{color:#718096;line-height:1.6;margin-bottom:8px}}
+h2{{color:#48bb78;margin-bottom:16px;font-size:28px}}
+p{{color:#718096;line-height:1.6;margin-bottom:8px}}
 .btn{{display:inline-block;margin-top:24px;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:600;color:#fff}}
-.b1{{background:#667eea}}.b2{{background:#48bb78;margin-left:12px}}</style></head>
+.b1{{background:#667eea}}.b2{{background:#48bb78;margin-left:12px}}
+</style></head>
 <body><div class="card">
-<h2>Application Logged!</h2>
+<h2>✅ Application Logged!</h2>
 <p><strong>{job_title}</strong> at <strong>{company}</strong></p>
-<p>This job has been added to your tracker.</p>
-<p>Click View Job to apply directly on the company website.</p>
-<a href="{job_link}" target="_blank" class="btn b1">View & Apply</a>
-<a href="/tracker" class="btn b2">My Tracker</a>
+<p>Added to your application tracker.</p>
+<p>Click below to apply directly on the company website.</p>
+<a href="{job_link}" target="_blank" class="btn b1">🔗 Apply on Company Site</a>
+<a href="/tracker" class="btn b2">📋 My Tracker</a>
 </div></body></html>"""
 
 @app.route("/tracker")
 def tracker():
-    init_tracker_db()
     applications = get_applications()
     companies = get_companies()
     return render_template_string(HTML, jobs=None, profile=None,
         companies=companies, search="", selected_company="",
-        page="tracker", applications=applications)
+        job_type="", page="tracker", applications=applications)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5001))
