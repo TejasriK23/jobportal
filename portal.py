@@ -36,7 +36,7 @@ def setup_database():
 
 setup_database()
 
-def get_all_jobs(search="", company=""):
+def get_all_jobs(search="", company="", job_type=""):
     conn = sqlite3.connect("jobs.db")
     c = conn.cursor()
     query = "SELECT id, title, company, location, description, apply_link, date_scraped, job_type FROM jobs WHERE 1=1"
@@ -47,6 +47,9 @@ def get_all_jobs(search="", company=""):
     if company:
         query += " AND company = ?"
         params.append(company)
+    if job_type:
+        query += " AND job_type = ?"
+        params.append(job_type)
     query += " ORDER BY date_scraped DESC"
     c.execute(query, params)
     rows = c.fetchall()
@@ -170,9 +173,15 @@ body{font-family:'Segoe UI',sans-serif;background:#f0f4f8;color:#2d3748}
 .hero p{font-size:18px;opacity:.9;margin-bottom:8px}
 .hero .sub{font-size:14px;opacity:.7;margin-bottom:32px}
 .upload-card{background:#fff;border-radius:16px;padding:32px;max-width:500px;margin:0 auto;box-shadow:0 4px 20px rgba(0,0,0,.15)}
-.upload-card label{display:block;font-weight:600;margin-bottom:8px;color:#4a5568}
-.upload-card input[type=file]{width:100%;padding:12px;border:2px dashed #cbd5e0;border-radius:8px;margin-bottom:16px;cursor:pointer}
-.btn{background:#667eea;color:#fff;border:none;padding:14px 28px;border-radius:8px;font-size:16px;font-weight:600;cursor:pointer;width:100%}
+.upload-card label{display:block;font-weight:600;margin-bottom:8px;color:#4a5568;font-size:15px}
+.file-wrapper{border:2px dashed #cbd5e0;border-radius:8px;padding:20px;text-align:center;margin-bottom:8px;cursor:pointer;transition:border-color .2s;background:#f7fafc}
+.file-wrapper:hover{border-color:#667eea;background:#ebf4ff}
+.file-wrapper input[type=file]{display:none}
+.file-wrapper .upload-icon{font-size:32px;margin-bottom:8px}
+.file-wrapper .upload-text{color:#718096;font-size:14px}
+.file-wrapper .upload-btn{display:inline-block;background:#667eea;color:#fff;padding:8px 20px;border-radius:6px;font-size:14px;font-weight:600;margin-top:8px;cursor:pointer}
+.file-name{font-size:14px;font-weight:600;color:#48bb78;margin-bottom:16px;min-height:22px;text-align:center}
+.btn{background:#667eea;color:#fff;border:none;padding:14px 28px;border-radius:8px;font-size:16px;font-weight:600;cursor:pointer;width:100%;transition:background .2s}
 .btn:hover{background:#5a67d8}
 .container{max-width:1100px;margin:0 auto;padding:32px 16px}
 .filters{background:#fff;border-radius:12px;padding:20px;margin-bottom:24px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;box-shadow:0 2px 8px rgba(0,0,0,.06)}
@@ -215,9 +224,6 @@ body{font-family:'Segoe UI',sans-serif;background:#f0f4f8;color:#2d3748}
 .status-pending{background:#feebc8;color:#744210}
 .page-title{font-size:24px;font-weight:700;margin-bottom:24px;color:#2d3748}
 .empty{text-align:center;padding:60px;color:#718096}
-.type-filter{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:24px}
-.type-btn{padding:8px 16px;border-radius:20px;border:2px solid #e2e8f0;background:#fff;cursor:pointer;font-size:13px;font-weight:600;color:#4a5568}
-.type-btn:hover,.type-btn.active{background:#667eea;color:#fff;border-color:#667eea}
 </style>
 </head>
 <body>
@@ -261,11 +267,27 @@ body{font-family:'Segoe UI',sans-serif;background:#f0f4f8;color:#2d3748}
   <p>Seattle & Remote USA — Amazon, Microsoft, Google, Boeing and more</p>
   <p class="sub">Upload your resume — AI scores every job by how well it matches you</p>
   <div class="upload-card">
-    <form method="POST" enctype="multipart/form-data"
-          onsubmit="document.getElementById('loading').style.display='block';this.querySelector('button').style.display='none'">
+    <form method="POST" enctype="multipart/form-data" id="uploadForm"
+          onsubmit="document.getElementById('loading').style.display='block';document.getElementById('submitBtn').style.display='none'">
       <label>Upload your resume (PDF)</label>
-      <input type="file" name="resume" accept=".pdf" required>
-      <button type="submit" class="btn">🔍 Analyze Resume & Find Jobs</button>
+      <div class="file-wrapper" onclick="document.getElementById('resumeInput').click()">
+        <div class="upload-icon">📄</div>
+        <div class="upload-text">Click to browse or drag your PDF here</div>
+        <div class="upload-btn">Choose File</div>
+        <input type="file" id="resumeInput" name="resume" accept=".pdf" required
+               onchange="
+                 var f = this.files[0];
+                 if(f){
+                   document.getElementById('fname').innerHTML = '✅ ' + f.name;
+                   document.getElementById('fname').style.color = '#48bb78';
+                   document.querySelector('.upload-text').innerText = 'File selected!';
+                   document.querySelector('.file-wrapper').style.borderColor = '#48bb78';
+                   document.querySelector('.file-wrapper').style.background = '#f0fff4';
+                 }
+               ">
+      </div>
+      <div class="file-name" id="fname">No file selected</div>
+      <button type="submit" class="btn" id="submitBtn">🔍 Analyze Resume & Find Jobs</button>
     </form>
     <div id="loading" style="display:none;color:#667eea;margin-top:16px;font-weight:600;text-align:center">
       ⏳ Analyzing your resume and scoring all jobs...<br>
@@ -288,22 +310,10 @@ body{font-family:'Segoe UI',sans-serif;background:#f0f4f8;color:#2d3748}
   {% endif %}
 
   <div class="stats-bar">
-    <div class="stat">
-      <div class="stat-num">{{ jobs|length }}</div>
-      <div class="stat-label">Total Jobs</div>
-    </div>
-    <div class="stat">
-      <div class="stat-num">{{ jobs|selectattr('score','ge',70)|list|length }}</div>
-      <div class="stat-label">Strong Matches</div>
-    </div>
-    <div class="stat">
-      <div class="stat-num">{{ jobs|selectattr('type','equalto','Remote')|list|length }}</div>
-      <div class="stat-label">Remote Jobs</div>
-    </div>
-    <div class="stat">
-      <div class="stat-num">{{ companies|length }}</div>
-      <div class="stat-label">Companies</div>
-    </div>
+    <div class="stat"><div class="stat-num">{{ jobs|length }}</div><div class="stat-label">Total Jobs</div></div>
+    <div class="stat"><div class="stat-num">{{ jobs|selectattr('score','ge',70)|list|length }}</div><div class="stat-label">Strong Matches</div></div>
+    <div class="stat"><div class="stat-num">{{ jobs|selectattr('type','equalto','Remote')|list|length }}</div><div class="stat-label">Remote Jobs</div></div>
+    <div class="stat"><div class="stat-num">{{ companies|length }}</div><div class="stat-label">Companies</div></div>
   </div>
 
   <div class="filters">
@@ -315,9 +325,9 @@ body{font-family:'Segoe UI',sans-serif;background:#f0f4f8;color:#2d3748}
       </select>
       <select name="job_type">
         <option value="">All types</option>
-        <option value="Remote" {{ 'selected' if job_type=='Remote' }}>Remote 🌐</option>
-        <option value="Onsite" {{ 'selected' if job_type=='Onsite' }}>Onsite 📍</option>
-        <option value="Hybrid" {{ 'selected' if job_type=='Hybrid' }}>Hybrid 🔄</option>
+        <option value="Remote" {{ 'selected' if job_type=='Remote' }}>🌐 Remote</option>
+        <option value="Onsite" {{ 'selected' if job_type=='Onsite' }}>📍 Onsite</option>
+        <option value="Hybrid" {{ 'selected' if job_type=='Hybrid' }}>🔄 Hybrid</option>
       </select>
       <button type="submit">Search</button>
     </form>
@@ -348,13 +358,9 @@ body{font-family:'Segoe UI',sans-serif;background:#f0f4f8;color:#2d3748}
           <button type="submit" class="apply-btn">⚡ Apply Now</button>
         </form>
         <a href="{{ job.apply_link }}" target="_blank" class="view-btn">👁 View Job</a>
-        {% if job.type == 'Remote' %}
-        <span class="tag-remote">🌐 Remote</span>
-        {% elif job.type == 'Hybrid' %}
-        <span class="tag-hybrid">🔄 Hybrid</span>
-        {% else %}
-        <span class="tag-onsite">📍 Onsite</span>
-        {% endif %}
+        {% if job.type == 'Remote' %}<span class="tag-remote">🌐 Remote</span>
+        {% elif job.type == 'Hybrid' %}<span class="tag-hybrid">🔄 Hybrid</span>
+        {% else %}<span class="tag-onsite">📍 Onsite</span>{% endif %}
       </div>
     </div>
     {% endfor %}
@@ -387,25 +393,9 @@ def index():
                 job_type="", page="home", applications=[])
 
     if search or selected_company or job_type:
-        conn = sqlite3.connect("jobs.db")
-        c = conn.cursor()
-        query = "SELECT id,title,company,location,description,apply_link,date_scraped,job_type FROM jobs WHERE 1=1"
-        params = []
-        if search:
-            query += " AND (title LIKE ? OR description LIKE ?)"
-            params += [f"%{search}%", f"%{search}%"]
-        if selected_company:
-            query += " AND company=?"
-            params.append(selected_company)
-        if job_type:
-            query += " AND job_type=?"
-            params.append(job_type)
-        query += " ORDER BY date_scraped DESC"
-        c.execute(query, params)
-        rows = c.fetchall()
-        conn.close()
-        jobs = [{"id":r[0],"title":r[1],"company":r[2],"location":r[3],
-                 "description":r[4],"apply_link":r[5],"date":r[6],"type":r[7],"score":0} for r in rows]
+        jobs = get_all_jobs(search, selected_company, job_type)
+        for job in jobs:
+            job["score"] = 0
         return render_template_string(HTML, jobs=jobs, profile=None,
             companies=companies, search=search, selected_company=selected_company,
             job_type=job_type, page="home", applications=[])
